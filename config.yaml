@@ -16,7 +16,7 @@ sources:
     # 블로그/카페 도메인 필터는 코드 레벨에서도 한 번 더 제거
 
 email:
-  smtp_host: "keullipingnyuseu@gmail.com"
+  smtp_host: "smtp.gmail.com"
   smtp_port: 587
   use_tls: true
   username: "keullipingnyuseu@gmail.comm"
