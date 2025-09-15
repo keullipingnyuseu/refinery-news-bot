@@ -28,10 +28,14 @@ email:
   subject_prefix: "[정유 뉴스 요약]"
 
 openai:
-  enable_summarize: true
-  enable_embeddings: false
+  enable_summarize: true          # true/false
   model: "gpt-4o-mini"
   api_key_env: "OPENAI_API_KEY"
+  summarize_max_items: 20         # ★ 한 번에 요약할 최대 기사 수(전체 합계)
+  summarize_delay_secs: 1.5       # ★ 호출 간 대기(초)
+  summarize_backoff_secs: 20      # ★ 429 시 대기(초)
+  provider: "openai"              # "openai" | "heuristic" (모델 없이 규칙 요약)
+
 
 filters:
   block_domains:
