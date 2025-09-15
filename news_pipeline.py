@@ -1,22 +1,12 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py  (patched: robust fetch/logging/preview/SMTP logs)
-- Google News(RSS)에서 전일 lookback_hours 이내 기사 수집
-- 대분류/중분류/키워드 별 검색 → 정유 연관성 스코어 → 정치/잡음 필터 → 중복 제거
-- OpenAI로 1~2문장 요약 (enable_summarize=true일 때)
-- 카드형 HTML 이메일 전송 (섹션별 최대 N건)
-- email_preview.html을 항상 저장(워크플로 아티팩트/로컬 확인용)
+news_pipeline.py (AI 필터/시간표시/요약off)
+- Google News(RSS) 수집
+- 블랙리스트 사전 차단 → (선택) AI 관련성 필터 → 득점/정렬/TopN
+- HTML 메일: 제목, 리드문(summary), 게시 시각(KST), 링크 버튼
 """
 
-import os
-import sys
-import ssl
-import smtplib
-import pytz
-import yaml
-import feedparser
-import requests
-
+import os, sys, smtplib, pytz, yaml, feedparser, requests, time
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
@@ -25,25 +15,21 @@ from urllib.parse import quote_plus
 
 from utils.scoring import compute_score, apply_unrelated_penalty
 from utils.dedupe import dedupe_items
-from utils.summarize import summarize_1_2
+from utils.summarize import summarize_1_2  # 현재 enable_summarize:false
+from utils.relevance import is_relevant
 
 try:
     from apscheduler.schedulers.blocking import BlockingScheduler
 except Exception:
     BlockingScheduler = None
 
-
-# ---------- Config/Helpers ----------
+# ----------------- Helpers -----------------
 
 def load_config(path="config.yaml"):
     with open(path, "r", encoding="utf-8") as f:
         return yaml.safe_load(f)
 
 def google_news_rss(query, cfg):
-    """
-    Google News RSS를 requests + 명시적 UA로 가져온 후 feedparser로 파싱
-    (일부 환경에서 빈 피드 방지)
-    """
     base = cfg["sources"]["google_news"]["base"]
     params = {
         "q": f'{query} when:1d',
@@ -51,7 +37,7 @@ def google_news_rss(query, cfg):
         "gl": cfg["sources"]["google_news"]["gl"],
         "ceid": cfg["sources"]["google_news"]["ceid"],
     }
-    q = "&".join([f"{k}={quote_plus(v)}" for k, v in params.items()])
+    q = "&".join([f"{k}={quote_plus(v)}" for k,v in params.items()])
     url = f"{base}?{q}"
     headers = {"User-Agent": "Mozilla/5.0 (refinery-news-bot; +https://github.com)"}
     r = requests.get(url, headers=headers, timeout=15)
@@ -59,7 +45,6 @@ def google_news_rss(query, cfg):
     return feedparser.parse(r.text)
 
 def extract_text(entry):
-    # title + summary에서 텍스트 추출
     title = entry.get("title", "")
     summary_html = entry.get("summary", "")
     try:
@@ -75,21 +60,32 @@ def is_block_domain(link, cfg):
     return False
 
 def within_window(published, tz, start_dt, end_dt):
-    # feedparser의 published_parsed(tuple) → aware datetime으로 변환해 윈도우 체크
     if not published:
-        return True  # 일부 소스는 시간 미제공 → 포함(과도 제외는 스코어/키워드로 걸러짐)
+        return True
     try:
         dt = datetime(*published[:6], tzinfo=pytz.utc).astimezone(tz)
         return start_dt <= dt <= end_dt
     except Exception:
         return True
 
+def to_local_str(published, tz):
+    try:
+        dt = datetime(*published[:6], tzinfo=pytz.utc).astimezone(tz)
+        return dt.strftime("%Y-%m-%d %H:%M KST")
+    except Exception:
+        return "시간 정보 없음"
 
-# ---------- Scoring/Filtering ----------
+# ----------------- Pipeline pieces -----------------
 
 def build_query_terms(taxonomy_item):
-    # 하나의 중분류에 대해 모든 키워드를 개별 호출(AND/OR 복잡성 회피)
     return taxonomy_item["keywords"]
+
+def block_by_keywords(title, summary, cfg):
+    low = f"{title} {summary}".lower()
+    for w in cfg["filters"].get("block_keywords", []):
+        if w.lower() in low:
+            return True
+    return False
 
 def score_and_filter(items, hit_keywords, cfg):
     scored = []
@@ -98,19 +94,16 @@ def score_and_filter(items, hit_keywords, cfg):
         s = compute_score(text, cfg)
         s += apply_unrelated_penalty(hit_keywords, text, cfg)
         if s < 0:
-            continue  # 정치/연성 과도 페널티로 컷
+            continue
         it["score"] = s
         scored.append(it)
     return sorted(scored, key=lambda x: x["score"], reverse=True)
-
-
-# ---------- HTML/Email ----------
 
 def make_html_email(grouped, cfg, start_dt, end_dt):
     head = f"""
     <html><body style="font-family:Arial,Helvetica,sans-serif;">
       <h2>정유 뉴스 요약 ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')} KST)</h2>
-      <p style="color:#666;">정유사 직원 관점 유의미 기사만 선별 · 요약했습니다.</p>
+      <p style="color:#666;">정유사 직원 관점 유의미 기사만 선별했습니다. (각 카드에 게시 시각 표시)</p>
     """
     cards = []
     for major, minors in grouped.items():
@@ -120,10 +113,13 @@ def make_html_email(grouped, cfg, start_dt, end_dt):
                 continue
             cards.append(f'<h4 style="margin:10px 0 6px 0;color:#0a4;">{minor}</h4>')
             for it in items:
+                # 요약은 제거, 원문 summary와 게시시간 표시
+                posted = it.get("published_local", "시간 정보 없음")
                 cards.append(f"""
                 <div style="border:1px solid #eee;border-radius:10px;padding:12px;margin:8px 0;">
+                  <div style="color:#888;font-size:0.9em;margin-bottom:4px;">📅 {posted}</div>
                   <div style="font-weight:600;margin-bottom:6px;">{it['title']}</div>
-                  <div style="color:#333;margin-bottom:8px;">{it['summary_short']}</div>
+                  <div style="color:#333;margin-bottom:8px;">{it['summary']}</div>
                   <a style="display:inline-block;background:#1565C0;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none;"
                      href="{it['link']}" target="_blank" rel="noopener">원문 보기</a>
                 </div>
@@ -150,8 +146,7 @@ def send_email(html, cfg):
     server.sendmail(cfg["email"]["from_addr"], cfg["email"]["to_addrs"], msg.as_string())
     server.quit()
 
-
-# ---------- Main Run ----------
+# ----------------- Main run -----------------
 
 def run_once():
     cfg = load_config()
@@ -165,8 +160,10 @@ def run_once():
     grouped = {}
     total_raw = 0
     total_kept = 0
+    ai_budget = int(cfg["openai"].get("relevance_max_checks", 80)) if cfg.get("openai") else 0
+    ai_used = 0
+    use_ai = bool(cfg.get("openai", {}).get("enable_ai_filter", False))
 
-    # 수집
     for tax in taxonomy:
         major, minor = tax["major"], tax["minor"]
         grouped.setdefault(major, {})
@@ -189,11 +186,15 @@ def run_once():
                         continue
                     if not within_window(getattr(e, "published_parsed", None), tz, start_dt, end_dt):
                         continue
+                    if block_by_keywords(title, summary, cfg):
+                        continue
+                    published_local = to_local_str(getattr(e, "published_parsed", None), tz)
                     items.append({
                         "title": title,
                         "summary": summary,
                         "link": link,
                         "published": getattr(e, "published", ""),
+                        "published_local": published_local,
                         "source": getattr(e, "source", {}).get("title") if hasattr(e, "source") else "",
                     })
                 total_raw += len(items)
@@ -201,49 +202,37 @@ def run_once():
             except Exception as ex:
                 print(f"[WARN] fetch failed for {kw}: {ex}")
 
+        # 중복 제거
         before = len(bucket)
         bucket = dedupe_items(bucket)
         after_dedupe = len(bucket)
 
-        bucket = score_and_filter(bucket, set(keywords), cfg)
+        # --- AI 관련성 필터 (예산 내에서만 적용, 나머지는 휴리스틱은 is_relevant가 알아서 처리) ---
+        filtered = []
+        for it in bucket:
+            text = f"{it['title']}. {it['summary']}"
+            if use_ai and ai_used < ai_budget:
+                rel = is_relevant(text, cfg)  # 내부에서 AI→휴리스틱 순
+                ai_used += 1
+            else:
+                rel = is_relevant(text, {"openai":{"enable_ai_filter": False}, **cfg})  # 강제 휴리스틱
+            if rel:
+                filtered.append(it)
+
+        # 스코어링/정렬/TopN
+        bucket = score_and_filter(filtered, set(keywords), cfg)
         after_score = len(bucket)
         kept = bucket[:cfg["app"]["max_items_per_subcategory"]]
-        total_kept += len(kept)
         grouped[major][minor] = kept
-        print(f"[KEEP] {major}/{minor}: before={before}, deduped={after_dedupe}, scored={after_score}, kept={len(kept)}")
+        total_kept += len(kept)
+        print(f"[KEEP] {major}/{minor}: before={before}, deduped={after_dedupe}, after_ai={len(filtered)}, scored={after_score}, kept={len(kept)}")
 
-    # 요약
-    # --- (요약 단계) 최종 kept 중 상위 N개만 모델 요약 ---
-    # 1) kept 전체를 평탄화하여 (major, minor, item, score) 리스트로 만들고 score순 정렬
-    kept_flat = []
-    for major in grouped:
-        for minor in grouped[major]:
-            for it in grouped[major][minor]:
-                kept_flat.append((major, minor, it, it.get("score", 0.0)))
-    kept_flat.sort(key=lambda x: x[3], reverse=True)
-
-    # 2) 요약 최대 개수
-    max_sum = int(cfg["openai"].get("summarize_max_items", 20)) if cfg.get("openai") else 0
-
-    summarized = 0
-    for idx, (major, minor, it, _) in enumerate(kept_flat):
-        text = f"{it['title']}. {it['summary']}"
-        # 상위 max_sum까지만 summarize_1_2, 나머지는 휴리스틱
-        if summarized < max_sum and cfg.get("openai", {}).get("enable_summarize", False) \
-           and (cfg.get("openai", {}).get("provider","openai").lower() != "heuristic"):
-            it["summary_short"] = summarize_1_2(text, cfg)
-            summarized += 1
-        else:
-            from utils.summarize import _heuristic
-            it["summary_short"] = _heuristic(text)
-
-    print(f"[INFO] Summarized with model: {summarized} items; heuristic-only: {max(0, len(kept_flat)-summarized)}")
-
+    # 요약 단계 제거(요약 미사용). 필요 시 cfg.openai.enable_summarize true로 바꾸면 summarize_1_2 사용 가능.
 
     # HTML 생성
     html = make_html_email(grouped, cfg, start_dt, end_dt)
 
-    # 미리보기 저장 (항상)
+    # 미리보기 저장
     try:
         with open("email_preview.html", "w", encoding="utf-8") as f:
             f.write(html)
@@ -251,7 +240,7 @@ def run_once():
     except Exception as ex:
         print(f"[WARN] preview save failed: {ex}")
 
-    print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}")
+    print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}, ai_used={ai_used}")
     if total_kept == 0:
         print("[INFO] No items kept; sending email anyway (empty) to validate SMTP...")
 
@@ -263,14 +252,10 @@ def run_once():
         print(f"[ERROR] send_email failed: {ex}")
         raise
 
-
 def main():
-    # --once: 즉시 한 번 실행 (GitHub Actions 권장)
     if "--once" in sys.argv or BlockingScheduler is None:
         run_once()
         return
-
-    # 스케줄러 모드(로컬/서버에서 상시 구동 시)
     cfg = load_config()
     tz = pytz.timezone(cfg["app"]["timezone"])
     sched = BlockingScheduler(timezone=tz)
@@ -280,7 +265,6 @@ def main():
         sched.start()
     except (KeyboardInterrupt, SystemExit):
         pass
-
 
 if __name__ == "__main__":
     main()
