@@ -213,11 +213,32 @@ def run_once():
         print(f"[KEEP] {major}/{minor}: before={before}, deduped={after_dedupe}, scored={after_score}, kept={len(kept)}")
 
     # 요약
+    # --- (요약 단계) 최종 kept 중 상위 N개만 모델 요약 ---
+    # 1) kept 전체를 평탄화하여 (major, minor, item, score) 리스트로 만들고 score순 정렬
+    kept_flat = []
     for major in grouped:
         for minor in grouped[major]:
             for it in grouped[major][minor]:
-                text = f"{it['title']}. {it['summary']}"
-                it["summary_short"] = summarize_1_2(text, cfg)
+                kept_flat.append((major, minor, it, it.get("score", 0.0)))
+    kept_flat.sort(key=lambda x: x[3], reverse=True)
+
+    # 2) 요약 최대 개수
+    max_sum = int(cfg["openai"].get("summarize_max_items", 20)) if cfg.get("openai") else 0
+
+    summarized = 0
+    for idx, (major, minor, it, _) in enumerate(kept_flat):
+        text = f"{it['title']}. {it['summary']}"
+        # 상위 max_sum까지만 summarize_1_2, 나머지는 휴리스틱
+        if summarized < max_sum and cfg.get("openai", {}).get("enable_summarize", False) \
+           and (cfg.get("openai", {}).get("provider","openai").lower() != "heuristic"):
+            it["summary_short"] = summarize_1_2(text, cfg)
+            summarized += 1
+        else:
+            from utils.summarize import _heuristic
+            it["summary_short"] = _heuristic(text)
+
+    print(f"[INFO] Summarized with model: {summarized} items; heuristic-only: {max(0, len(kept_flat)-summarized)}")
+
 
     # HTML 생성
     html = make_html_email(grouped, cfg, start_dt, end_dt)
