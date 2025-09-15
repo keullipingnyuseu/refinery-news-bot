@@ -202,19 +202,13 @@ def run_once():
             except Exception as ex:
                 print(f"[WARN] fetch failed for {kw}: {ex}")
 
+
         # 중복 제거
         before = len(bucket)
         bucket = dedupe_items(bucket)
         after_dedupe = len(bucket)
 
-        # --- AI 관련성 필터 (예산 내에서만 적용, 나머지는 휴리스틱은 is_relevant가 알아서 처리) ---
-               # 중복 제거
-        before = len(bucket)
-        bucket = dedupe_items(bucket)
-        after_dedupe = len(bucket)
-
-        # ---------- 상위 100개만 AI 필터 ----------
-        # 1) 휴리스틱 프리스코어로 우선 정렬(빠르게 '유의미할 것 같은' 순서 만들기)
+        # --- 1차: 휴리스틱 스코어링으로 정렬 ---
         prelims = []
         hitset = set(keywords)
         for it in bucket:
@@ -222,36 +216,33 @@ def run_once():
             pre = compute_score(txt, cfg) + apply_unrelated_penalty(hitset, txt, cfg)
             it["_pre_score"] = pre
             prelims.append(it)
-        prelims.sort(key=lambda x: x.get("_pre_score", 0.0), reverse=True)
+        prelims.sort(key=lambda x: x["_pre_score"], reverse=True)
 
-        # 2) 이번 소분류에서 AI 적용 가능한 개수 = (전역 잔여 한도)
-        global_limit = int(cfg.get("openai", {}).get("relevance_max_checks", 100)) if cfg.get("openai") else 0
+        # --- 2차: 전역 30개만 AI 판별 ---
+        global_limit = int(cfg.get("openai", {}).get("relevance_max_checks", 30))
         can_use = max(0, global_limit - ai_used)
         top_n = min(can_use, len(prelims))
 
-        # 3) 상위 top_n에는 AI 필터, 나머지는 휴리스틱으로만 판정
         filtered = []
-        # (AI 켠 cfg와, AI 끈 cfg를 각각 준비)
         cfg_no_ai = {**cfg, "openai": {**cfg.get("openai", {}), "enable_ai_filter": False}}
         for idx, it in enumerate(prelims):
             txt = f"{it['title']}. {it['summary']}"
-            if use_ai and idx < top_n:
-                rel = is_relevant(txt, cfg)          # AI → (내부에서 실패시 휴리스틱 폴백)
+            if idx < top_n and cfg["openai"].get("enable_ai_filter", False):
+                rel = is_relevant(txt, cfg)
                 ai_used += 1
             else:
-                rel = is_relevant(txt, cfg_no_ai)    # 휴리스틱만
+                rel = is_relevant(txt, cfg_no_ai)  # 휴리스틱만
             if rel:
                 filtered.append(it)
 
-        # 스코어링/정렬/TopN
+        # --- 3차: 최종 스코어링 + 상위 N 보존 ---
         bucket = score_and_filter(filtered, hitset, cfg)
-        after_score = len(bucket)
         kept = bucket[:cfg["app"]["max_items_per_subcategory"]]
         grouped[major][minor] = kept
         total_kept += len(kept)
-        print(f"[KEEP] {major}/{minor}: before={before}, deduped={after_dedupe}, "
-              f"AI_used_now={min(top_n, len(prelims)) if use_ai else 0}, after_ai={len(filtered)}, "
-              f"scored={after_score}, kept={len(kept)}")
+        print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, "
+              f"ai_used_now={min(top_n,len(prelims))}, kept={len(kept)}")
+
 
     # 요약 단계 제거(요약 미사용). 필요 시 cfg.openai.enable_summarize true로 바꾸면 summarize_1_2 사용 가능.
 
