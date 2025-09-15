@@ -26,14 +26,13 @@ email:
   subject_prefix: "[정유 뉴스 요약]"
 
 openai:
-  # (요약) 기본 비활성화
-  enable_summarize: false
-  provider: "heuristic"              # "heuristic"이면 모델 호출 없이 규칙 요약(현재 미사용)
-  model: "gpt-4o-mini"
-  api_key_env: "OPENAI_API_KEY"
-  summarize_max_items: 20
-  summarize_delay_secs: 1.5
-  summarize_backoff_secs: 20
+  enable_ai_filter: true
+  relevance_model: "gpt-4o-mini"
+  relevance_max_checks: 100   # ★ 전역 한도를 100으로 고정
+  relevance_delay_secs: 1.0
+  relevance_backoff_secs: 8
+  relevance_threshold: 0.5
+
 
   # (AI 필터링) 강력 필터 옵션
   enable_ai_filter: true
