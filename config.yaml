@@ -17,12 +17,12 @@ email:
   smtp_host: "smtp.gmail.com"        # 실제 SMTP 서버 주소로 교체
   smtp_port: 587
   use_tls: true
-  username: "your_account@gmail.com" # 실제 계정
+  username: "keullipingnyuseu@gmail.com" # 실제 계정
   password_env: "SMTP_PASSWORD"
   from_name: "정유사 AI 뉴스봇"
-  from_addr: "your_account@gmail.com"
+  from_addr: "keullipingnyuseu@gmail.com"
   to_addrs:
-    - "team@example.com"
+    - "wh.lee@gscaltex.com"
   subject_prefix: "[정유 뉴스 요약]"
 
 openai:
@@ -72,9 +72,9 @@ filters:
     - "예능"
     - "유튜버"
     - "인플루언서"
-    - "손흥민"
+    - "장혁"
     - "BTS"
-    - "블랙핑크"
+    - "성우"
 
   political_noise_keywords:
     - "우파"
