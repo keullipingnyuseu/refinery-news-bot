@@ -1,11 +1,17 @@
+# --- core ---
+requests==2.32.3
+httpx==0.27.2          # ★ OpenAI SDK와 호환 버전으로 고정
 feedparser==6.0.11
 beautifulsoup4==4.12.3
 html5lib==1.1
-requests==2.32.3
 pytz==2024.1
 python-dateutil==2.9.0.post0
-rapidfuzz==3.9.6
-openai==1.51.0
 pyyaml==6.0.2
+rapidfuzz==3.9.6
 Jinja2==3.1.4
+
+# --- scheduling ---
 APScheduler==3.10.4
+
+# --- OpenAI SDK ---
+openai==1.51.0         # 사용 중인 SDK 버전에 맞춰 둠 (httpx 0.27.x와 호환)
