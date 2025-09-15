@@ -19,7 +19,7 @@ email:
   smtp_host: "smtp.gmail.com"
   smtp_port: 587
   use_tls: true
-  username: "keullipingnyuseu@gmail.comm"
+  username: "keullipingnyuseu@gmail.com"
   password_env: "SMTP_PASSWORD"   # 환경변수에서 불러옴
   from_name: "정유사 AI 뉴스봇"
   from_addr: "keullipingnyuseu@gmail.com"
