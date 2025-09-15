@@ -1,9 +1,9 @@
 app:
   timezone: "Asia/Seoul"
-  run_time_hour: 8        # 매일 08:00
+  run_time_hour: 8
   lookback_hours: 24
   max_items_per_subcategory: 5
-  language: "ko"          # Google News 지역/언어
+  language: "ko"
   country: "KR"
 
 sources:
@@ -12,30 +12,36 @@ sources:
     hl: "ko"
     gl: "KR"
     ceid: "KR:ko"
-    # Google News 검색 예시: q="키워드 when:1d site:-(tistory.com) -blog"
-    # 블로그/카페 도메인 필터는 코드 레벨에서도 한 번 더 제거
 
 email:
-  smtp_host: "smtp.gmail.com"
+  smtp_host: "smtp.gmail.com"        # 실제 SMTP 서버 주소로 교체
   smtp_port: 587
   use_tls: true
-  username: "keullipingnyuseu@gmail.com"
-  password_env: "SMTP_PASSWORD"   # 환경변수에서 불러옴
+  username: "your_account@gmail.com" # 실제 계정
+  password_env: "SMTP_PASSWORD"
   from_name: "정유사 AI 뉴스봇"
-  from_addr: "keullipingnyuseu@gmail.com"
+  from_addr: "your_account@gmail.com"
   to_addrs:
-    - "wh.lee@gscaltex.com"
+    - "team@example.com"
   subject_prefix: "[정유 뉴스 요약]"
 
 openai:
-  enable_summarize: true          # true/false
+  # (요약) 기본 비활성화
+  enable_summarize: false
+  provider: "heuristic"              # "heuristic"이면 모델 호출 없이 규칙 요약(현재 미사용)
   model: "gpt-4o-mini"
   api_key_env: "OPENAI_API_KEY"
-  summarize_max_items: 20         # ★ 한 번에 요약할 최대 기사 수(전체 합계)
-  summarize_delay_secs: 1.5       # ★ 호출 간 대기(초)
-  summarize_backoff_secs: 20      # ★ 429 시 대기(초)
-  provider: "openai"              # "openai" | "heuristic" (모델 없이 규칙 요약)
+  summarize_max_items: 20
+  summarize_delay_secs: 1.5
+  summarize_backoff_secs: 20
 
+  # (AI 필터링) 강력 필터 옵션
+  enable_ai_filter: true
+  relevance_model: "gpt-4o-mini"     # 분류에 사용할 모델
+  relevance_max_checks: 80           # 실행 1회당 최대 AI 판별 호출 수(예: 전체 후보 중 상위 80개만 AI 판별)
+  relevance_delay_secs: 0.8          # 호출간 딜레이
+  relevance_backoff_secs: 15         # 429 시 대기
+  relevance_threshold: 0.5           # 0~1, '관련' 확신도 임계값(0.5 권장)
 
 filters:
   block_domains:
@@ -45,6 +51,32 @@ filters:
     - "medium.com"
     - "brunch.co.kr"
     - "velog.io"
+
+  # 완전 차단(등장하면 즉시 제외)
+  block_keywords:
+    # 정치
+    - "대통령"
+    - "총선"
+    - "대선"
+    - "국회"
+    - "여당"
+    - "야당"
+    - "민주당"
+    - "국민의힘"
+    - "정당"
+    - "정치인"
+    # 연예/문화/스포츠(대표)
+    - "가수"
+    - "배우"
+    - "아이돌"
+    - "드라마"
+    - "예능"
+    - "유튜버"
+    - "인플루언서"
+    - "손흥민"
+    - "BTS"
+    - "블랙핑크"
+
   political_noise_keywords:
     - "우파"
     - "좌파"
@@ -55,6 +87,7 @@ filters:
     - "총선"
     - "대선"
     - "국회"
+
   soft_noise_keywords:
     - "연예"
     - "게임"
@@ -66,7 +99,7 @@ filters:
 scoring:
   base_match: 1.0
   refinery_relevance:
-    fuel_terms:              # 정유 연관성 가중치(+)
+    fuel_terms:
       - "경유"
       - "휘발유"
       - "등유"
@@ -92,7 +125,7 @@ scoring:
     terms: ["연예","게임","SNS","유튜버","루머","썰"]
     weight: -2.0
   unrelated_penalty:
-    weight: -1.0            # 키워드 1개만 걸리고 전체 맥락상 정유와 멀면 페널티
+    weight: -1.0
 
 taxonomy:
   - major: "특수영업팀 전체"
