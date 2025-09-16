@@ -1,9 +1,9 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py (AI 필터/시간표시/요약off)
+news_pipeline.py (제목만 표시 / 전역 중복 제거 / AI 최소화 설정과 호환)
 - Google News(RSS) 수집
-- 블랙리스트 사전 차단 → (선택) AI 관련성 필터 → 득점/정렬/TopN
-- HTML 메일: 제목, 리드문(summary), 게시 시각(KST), 링크 버튼
+- 블랙리스트 사전 차단 → (선택) AI 관련성 필터(상위 N개만) → 득점/정렬/TopN
+- HTML 메일: 제목, 게시 시각(KST), 링크 버튼  ※ 요약/본문 미표시
 """
 
 import os, sys, smtplib, pytz, yaml, feedparser, requests, time
@@ -14,8 +14,7 @@ from email.mime.text import MIMEText
 from urllib.parse import quote_plus
 
 from utils.scoring import compute_score, apply_unrelated_penalty
-from utils.dedupe import dedupe_items
-from utils.summarize import summarize_1_2  # 현재 enable_summarize:false
+from utils.dedupe import dedupe_items, normalize_url  # ★ 전역 중복 제거에 사용
 from utils.relevance import is_relevant
 
 try:
@@ -90,7 +89,7 @@ def block_by_keywords(title, summary, cfg):
 def score_and_filter(items, hit_keywords, cfg):
     scored = []
     for it in items:
-        text = f'{it["title"]} {it["summary"]}'
+        text = f'{it["title"]} {it.get("summary","")}'
         s = compute_score(text, cfg)
         s += apply_unrelated_penalty(hit_keywords, text, cfg)
         if s < 0:
@@ -100,6 +99,7 @@ def score_and_filter(items, hit_keywords, cfg):
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
 def make_html_email(grouped, cfg, start_dt, end_dt):
+    # ★ 요약/본문 삭제: 제목 + 게시 시각 + 링크 버튼만 출력
     head = f"""
     <html><body style="font-family:Arial,Helvetica,sans-serif;">
       <h2>정유 뉴스 요약 ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')} KST)</h2>
@@ -113,13 +113,11 @@ def make_html_email(grouped, cfg, start_dt, end_dt):
                 continue
             cards.append(f'<h4 style="margin:10px 0 6px 0;color:#0a4;">{minor}</h4>')
             for it in items:
-                # 요약은 제거, 원문 summary와 게시시간 표시
                 posted = it.get("published_local", "시간 정보 없음")
                 cards.append(f"""
                 <div style="border:1px solid #eee;border-radius:10px;padding:12px;margin:8px 0;">
                   <div style="color:#888;font-size:0.9em;margin-bottom:4px;">📅 {posted}</div>
-                  <div style="font-weight:600;margin-bottom:6px;">{it['title']}</div>
-                  <div style="color:#333;margin-bottom:8px;">{it['summary']}</div>
+                  <div style="font-weight:600;margin-bottom:10px;">{it['title']}</div>
                   <a style="display:inline-block;background:#1565C0;color:#fff;padding:8px 12px;border-radius:6px;text-decoration:none;"
                      href="{it['link']}" target="_blank" rel="noopener">원문 보기</a>
                 </div>
@@ -160,7 +158,11 @@ def run_once():
     grouped = {}
     total_raw = 0
     total_kept = 0
-    ai_budget = int(cfg["openai"].get("relevance_max_checks", 80)) if cfg.get("openai") else 0
+
+    # ★ 전역 중복 방지용 세트 (정규화 URL 기준)
+    global_seen = set()
+
+    ai_budget = int(cfg["openai"].get("relevance_max_checks", 30)) if cfg.get("openai") else 0
     ai_used = 0
     use_ai = bool(cfg.get("openai", {}).get("enable_ai_filter", False))
 
@@ -191,7 +193,7 @@ def run_once():
                     published_local = to_local_str(getattr(e, "published_parsed", None), tz)
                     items.append({
                         "title": title,
-                        "summary": summary,
+                        "summary": summary,  # 내부 스코어링에만 사용, 렌더링에는 미사용
                         "link": link,
                         "published": getattr(e, "published", ""),
                         "published_local": published_local,
@@ -202,23 +204,22 @@ def run_once():
             except Exception as ex:
                 print(f"[WARN] fetch failed for {kw}: {ex}")
 
-
-        # 중복 제거
+        # 1) 소분류 내 중복 제거
         before = len(bucket)
         bucket = dedupe_items(bucket)
         after_dedupe = len(bucket)
 
-        # --- 1차: 휴리스틱 스코어링으로 정렬 ---
+        # 2) 휴리스틱 프리-스코어 정렬
         prelims = []
         hitset = set(keywords)
         for it in bucket:
-            txt = f"{it['title']} {it['summary']}"
+            txt = f"{it['title']} {it.get('summary','')}"
             pre = compute_score(txt, cfg) + apply_unrelated_penalty(hitset, txt, cfg)
             it["_pre_score"] = pre
             prelims.append(it)
         prelims.sort(key=lambda x: x["_pre_score"], reverse=True)
 
-        # --- 2차: 전역 30개만 AI 판별 ---
+        # 3) 상위 N개만 AI 필터, 나머지는 휴리스틱
         global_limit = int(cfg.get("openai", {}).get("relevance_max_checks", 30))
         can_use = max(0, global_limit - ai_used)
         top_n = min(can_use, len(prelims))
@@ -226,27 +227,35 @@ def run_once():
         filtered = []
         cfg_no_ai = {**cfg, "openai": {**cfg.get("openai", {}), "enable_ai_filter": False}}
         for idx, it in enumerate(prelims):
-            txt = f"{it['title']}. {it['summary']}"
-            if idx < top_n and cfg["openai"].get("enable_ai_filter", False):
+            txt = f"{it['title']}. {it.get('summary','')}"
+            if idx < top_n and use_ai:
                 rel = is_relevant(txt, cfg)
                 ai_used += 1
             else:
-                rel = is_relevant(txt, cfg_no_ai)  # 휴리스틱만
+                rel = is_relevant(txt, cfg_no_ai)
             if rel:
                 filtered.append(it)
 
-        # --- 3차: 최종 스코어링 + 상위 N 보존 ---
+        # 4) 최종 스코어링
         bucket = score_and_filter(filtered, hitset, cfg)
-        kept = bucket[:cfg["app"]["max_items_per_subcategory"]]
-        grouped[major][minor] = kept
-        total_kept += len(kept)
+
+        # 5) ★ 전역 중복 제거하면서 상위 N개 보존
+        kept_unique = []
+        for it in bucket:
+            nu = normalize_url(it["link"])
+            if nu in global_seen:
+                continue  # 이미 다른 대/중분류에서 채택됨 → 스킵
+            kept_unique.append(it)
+            global_seen.add(nu)
+            if len(kept_unique) >= cfg["app"]["max_items_per_subcategory"]:
+                break
+
+        grouped[major][minor] = kept_unique
+        total_kept += len(kept_unique)
         print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, "
-              f"ai_used_now={min(top_n,len(prelims))}, kept={len(kept)}")
+              f"ai_used_now={min(top_n,len(prelims)) if use_ai else 0}, kept_unique={len(kept_unique)}")
 
-
-    # 요약 단계 제거(요약 미사용). 필요 시 cfg.openai.enable_summarize true로 바꾸면 summarize_1_2 사용 가능.
-
-    # HTML 생성
+    # HTML 생성 (제목만 표시)
     html = make_html_email(grouped, cfg, start_dt, end_dt)
 
     # 미리보기 저장
