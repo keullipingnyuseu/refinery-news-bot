@@ -3,16 +3,7 @@ app:
   run_time_hour: 8
   lookback_hours: 24
   max_items_per_subcategory: 5
-  language: "ko"
-  country: "KR"
-
-openai:
-  enable_ai_filter: true
-  relevance_model: "gpt-4o-mini"
-  relevance_max_checks: 30     # ★ 실행당 최대 30개만 AI 필터 돌림
-  relevance_delay_secs: 1.0    # 호출 간 딜레이
-  relevance_backoff_secs: 8
-  relevance_threshold: 0.6     # 보수적으로 true만 살림
+  selection_mode: "scored"   # "scored": 휴리스틱+AI 일부 / "recent": 최신순만
 
 sources:
   google_news:
@@ -22,16 +13,25 @@ sources:
     ceid: "KR:ko"
 
 email:
-  smtp_host: "smtp.gmail.com"        # 실제 SMTP 서버 주소로 교체
+  smtp_host: "smtp.gmail.com"
   smtp_port: 587
   use_tls: true
-  username: "keullipingnyuseu@gmail.com" # 실제 계정
+  username: "keullipingnyuseu@gmail.com"
   password_env: "SMTP_PASSWORD"
-  from_name: "정유사 AI 뉴스봇"
+  from_name: "정유 뉴스봇"
   from_addr: "keullipingnyuseu@gmail.com"
   to_addrs:
     - "wh.lee@gscaltex.com"
-  subject_prefix: "[정유 뉴스 요약]"
+  subject_prefix: "[정유 뉴스]"
+
+openai:
+  enable_ai_filter: true
+  relevance_model: "gpt-4o-mini"
+  relevance_max_checks: 40
+  relevance_delay_secs: 1.0
+  relevance_backoff_secs: 8
+  relevance_threshold: 0.65
+  api_key_env: "OPENAI_API_KEY"
 
 filters:
   block_domains:
@@ -41,8 +41,6 @@ filters:
     - "medium.com"
     - "brunch.co.kr"
     - "velog.io"
-
-  # 정치/연예/사회 잡음 차단
   block_keywords:
     - "대통령"
     - "총선"
@@ -67,67 +65,27 @@ filters:
     - "예능"
     - "유튜버"
     - "인플루언서"
-    - "우파"
-    - "좌파"
-    - "방화범"
-    - "Vietnam"
-    - "전한길"
-    - "잡초"
-    
 
 scoring:
-  # 기본 가중
   base: 0.0
-
-  # 정유/유종 관련 히트어(존재만으로 +)
   fuel_core_terms:
     terms: ["경유","휘발유","등유","항공유","VLSFO","LSFO","MF380","벙커C유","중유","ULSD","MGO","Gasoil","Gasoline","Kerosene","Jet A-1","JP-5","JP-8","아스팔트","AP-5"]
     weight: 1.0
-
-  # ★ 수요 증가 시그널(차량/선박/항공/어업/물류/건설/날씨/명절 이동 등)
   demand_signals:
-    terms: [
-      "차량 증가","신차 등록","물류 증가","교통량 증가","고속도로 통행량","여객 증가","승객 수","탑승률","항공 수요",
-      "조업 재개","조업 증가","어획량 증가","어선 증가","출어 횟수","풍어",
-      "훼리 증가","여객선 증가","항로 신설","항로 증편","운항 재개","운항 증가",
-      "컨테이너 물동량","항만 물동량","해상 물동량","화물 증가",
-      "건설 수요","도로 건설","아스콘 발주","아스팔트 발주",
-      "한파","폭염","난방 수요","냉방 수요",
-      "명절 귀성","연휴 이동","성수기"
-    ]
+    terms: ["차량 증가","신차 등록","물류 증가","교통량 증가","고속도로 통행량","여객 증가","승객 수","탑승률","항공 수요","조업 재개","조업 증가","어획량 증가","어선 증가","출어 횟수","풍어","훼리 증가","여객선 증가","항로 신설","항로 증편","운항 재개","운항 증가","컨테이너 물동량","항만 물동량","해상 물동량","화물 증가","건설 수요","도로 건설","아스콘 발주","아스팔트 발주","한파","폭염","난방 수요","냉방 수요","명절 귀성","연휴 이동","성수기"]
     weight: 2.5
-
-  # ★ 가격/마진/세제 변화 시그널(직접적)
   price_signals:
-    terms: [
-      "유가 상승","유가 급등","유가 하락","국제 유가","정제마진","크랙 스프레드","스프레드",
-      "휘발유 가격","경유 가격","항공유 가격","아스팔트 가격","중유 가격",
-      "석유 제품 가격","공장도가","국내 가격 인상","국내 가격 인하","세금 인상","세금 인하",
-      "OSP","OPEC 감산","증산","재고 감소","재고 증가"
-    ]
+    terms: ["유가 상승","유가 급등","유가 하락","국제 유가","정제마진","크랙 스프레드","스프레드","휘발유 가격","경유 가격","항공유 가격","아스팔트 가격","중유 가격","석유 제품 가격","공장도가","국내 가격 인상","국내 가격 인하","세금 인상","세금 인하","OSP","OPEC 감산","증산","재고 감소","재고 증가"]
     weight: 3.0
-
-  # 정책/조달/규제/사고/가동 정비 등 (수요·공급 측면 영향)
   ops_supply_signals:
-    terms: [
-      "조달","입찰","발주","공급 계약","장기 공급",
-      "정유사 가동","정비","정지","재가동","가동률",
-      "파업","노사","물류대란","항만 정체",
-      "제한 속도 해제","긴급 수송","연료 사용 확대",
-      "환경 규제","유황 규제","IMO","스크러버"
-    ]
+    terms: ["조달","입찰","발주","공급 계약","장기 공급","정유사 가동","정비","정지","재가동","가동률","파업","노사","물류대란","항만 정체","제한 속도 해제","긴급 수송","연료 사용 확대","환경 규제","유황 규제","IMO","스크러버"]
     weight: 1.5
-
-  # 정치/연성 기사 페널티
   soft_penalty:
     terms: ["정당","선거","연예","예능","유튜버"]
     weight: -3.0
-
-  # 제목에 ‘[속보]·[단독]’만 다르고 유사 기사면 페널티 (최종 dedupe가 있지만 스코어에도 반영)
   noise_tokens:
     terms: ["[속보]","속보","[단독]","단독","[영상]","[포토]"]
     weight: -0.2
-
 
 taxonomy:
   - major: "특수영업팀 전체"
