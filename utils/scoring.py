@@ -1,43 +1,27 @@
-# utils/scoring.py
-import re
+def _count_hits(text_low: str, terms: list) -> int:
+    return sum(1 for t in terms if t.lower() in text_low)
 
-def _contains_any(text_low, terms):
-    return any(t.lower() in text_low for t in terms)
-
-def compute_score(text, cfg):
+def compute_score(text: str, cfg: dict) -> float:
     tl = (text or "").lower()
-    s = 0.0
+    S = 0.0
+    S += cfg["scoring"].get("base", 0.0)
 
-    # 수요/가격 신호 가중
-    s += cfg["scoring"]["price_signals"]["weight"] * sum(1 for t in cfg["scoring"]["price_signals"]["terms"] if t.lower() in tl)
-    s += cfg["scoring"]["demand_signals"]["weight"] * sum(1 for t in cfg["scoring"]["demand_signals"]["terms"] if t.lower() in tl)
+    S += cfg["scoring"]["fuel_core_terms"]["weight"] * _count_hits(tl, cfg["scoring"]["fuel_core_terms"]["terms"])
+    S += cfg["scoring"]["demand_signals"]["weight"] * _count_hits(tl, cfg["scoring"]["demand_signals"]["terms"])
+    S += cfg["scoring"]["price_signals"]["weight"]  * _count_hits(tl, cfg["scoring"]["price_signals"]["terms"])
+    S += cfg["scoring"]["ops_supply_signals"]["weight"] * _count_hits(tl, cfg["scoring"]["ops_supply_signals"]["terms"])
 
-    # 연료/유종 용어 가중
-    s += cfg["scoring"]["fuel_terms"]["weight"] * sum(1 for t in cfg["scoring"]["fuel_terms"]["terms"] if t.lower() in tl)
+    # 연성/정치 잡음 페널티
+    S += cfg["scoring"]["soft_penalty"]["weight"] * _count_hits(tl, cfg["scoring"]["soft_penalty"]["terms"])
 
-    # 채널별 수요 신호(수협/훼리)
-    ch = cfg["scoring"]["channel_signals"]
-    s += ch["weight"] * sum(1 for t in ch["suhyup_terms"] if t.lower() in tl)
-    s += ch["weight"] * sum(1 for t in ch["ferry_terms"] if t.lower() in tl)
+    # 노이즈 토큰 소폭 페널티
+    S += cfg["scoring"]["noise_tokens"]["weight"] * _count_hits(tl, cfg["scoring"]["noise_tokens"]["terms"])
+    return S
 
-    # 정치/연예 페널티(강)
-    for t in cfg["scoring"]["political_penalty"]["terms"]:
-        if t.lower() in tl:
-            s += cfg["scoring"]["political_penalty"]["weight"]
-    for t in cfg["scoring"]["soft_penalty"]["terms"]:
-        if t.lower() in tl:
-            s += cfg["scoring"]["soft_penalty"]["weight"]
-
-    # 단위/지표 힌트(약)
-    if re.search(r'\b(bbl|배럴|정제|정유|스프레드|크랙|리터|원\/l|원\/리터)\b', tl):
-        s += 0.5
-
-    return s
-
-def apply_unrelated_penalty(hit_keywords, text, cfg):
+def apply_unrelated_penalty(hit_keywords: set, text: str, cfg: dict) -> float:
+    """키워드 한두 개만 걸리고 유종/시그널 연관이 거의 없으면 소폭 페널티(선택)."""
+    # 간단히 보수적 처리: 키워드 매칭 없으면 -0.5
     tl = (text or "").lower()
-    hits_kw = sum(tl.count(k.lower()) for k in hit_keywords)
-    hits_fu = sum(tl.count(t.lower()) for t in cfg["scoring"]["fuel_terms"]["terms"])
-    if hits_kw <= 0 and hits_fu <= 0:
-        return cfg["scoring"]["unrelated_penalty"]["weight"]
+    if not any(k.lower() in tl for k in hit_keywords):
+        return -0.5
     return 0.0
