@@ -33,16 +33,6 @@ email:
     - "wh.lee@gscaltex.com"
   subject_prefix: "[정유 뉴스 요약]"
 
-
-
- openai:
-  enable_ai_filter: true
-  relevance_model: "gpt-4o-mini"
-  relevance_max_checks: 40       # 실행 1회당 AI 판정 최대 40건만
-  relevance_delay_secs: 1.0
-  relevance_backoff_secs: 8
-  relevance_threshold: 0.65      # 관련성 기준은 보수적으로
-
 filters:
   block_domains:
     - "blog.naver.com"
