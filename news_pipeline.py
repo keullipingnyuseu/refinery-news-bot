@@ -1,21 +1,23 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py (제목만 표시 / 전역 중복 제거 / AI 최소화 설정과 호환)
+news_pipeline.py (제목만 표시 / 전역 URL+제목 유사도 중복 제거 / AI 최소화)
 - Google News(RSS) 수집
 - 블랙리스트 사전 차단 → (선택) AI 관련성 필터(상위 N개만) → 득점/정렬/TopN
 - HTML 메일: 제목, 게시 시각(KST), 링크 버튼  ※ 요약/본문 미표시
 """
 
-import os, sys, smtplib, pytz, yaml, feedparser, requests, time
+import os, sys, smtplib, pytz, yaml, feedparser, requests
 from bs4 import BeautifulSoup
 from datetime import datetime, timedelta
 from email.mime.multipart import MIMEMultipart
 from email.mime.text import MIMEText
 from urllib.parse import quote_plus
 
+from rapidfuzz.distance import Levenshtein
+
 from utils.scoring import compute_score, apply_unrelated_penalty
-from utils.dedupe import dedupe_items, normalize_url  # ★ 전역 중복 제거에 사용
-from utils.relevance import is_relevant
+from utils.dedupe import dedupe_items, normalize_url   # URL 전역 중복 제거에 사용
+from utils.relevance import is_relevant                # AI/휴리스틱 관련성 판정
 
 try:
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -74,6 +76,24 @@ def to_local_str(published, tz):
     except Exception:
         return "시간 정보 없음"
 
+# 제목 유사도 전역 중복 제거 (Levenshtein similarity)
+def dedupe_by_title_similarity(items, threshold=0.88):
+    result = []
+    seen_titles = []
+    for it in items:
+        title = (it.get("title") or "").strip()
+        dup = False
+        for seen in seen_titles:
+            # 유사도 = 1 - (edit distance / max len)
+            sim = 1 - (Levenshtein.distance(title, seen) / max(len(title), len(seen) or 1))
+            if sim >= threshold:
+                dup = True
+                break
+        if not dup:
+            result.append(it)
+            seen_titles.append(title)
+    return result
+
 # ----------------- Pipeline pieces -----------------
 
 def build_query_terms(taxonomy_item):
@@ -99,7 +119,7 @@ def score_and_filter(items, hit_keywords, cfg):
     return sorted(scored, key=lambda x: x["score"], reverse=True)
 
 def make_html_email(grouped, cfg, start_dt, end_dt):
-    # ★ 요약/본문 삭제: 제목 + 게시 시각 + 링크 버튼만 출력
+    # 제목 + 게시 시각 + 링크 버튼만 출력
     head = f"""
     <html><body style="font-family:Arial,Helvetica,sans-serif;">
       <h2>정유 뉴스 요약 ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')} KST)</h2>
@@ -159,9 +179,10 @@ def run_once():
     total_raw = 0
     total_kept = 0
 
-    # ★ 전역 중복 방지용 세트 (정규화 URL 기준)
-    global_seen = set()
+    # 전역 URL 중복 방지용 세트 (정규화 URL 기준)
+    global_seen_urls = set()
 
+    # AI 사용 예산
     ai_budget = int(cfg["openai"].get("relevance_max_checks", 30)) if cfg.get("openai") else 0
     ai_used = 0
     use_ai = bool(cfg.get("openai", {}).get("enable_ai_filter", False))
@@ -193,11 +214,13 @@ def run_once():
                     published_local = to_local_str(getattr(e, "published_parsed", None), tz)
                     items.append({
                         "title": title,
-                        "summary": summary,  # 내부 스코어링에만 사용, 렌더링에는 미사용
+                        "summary": summary,   # 내부 스코어링용, 렌더링에는 미사용
                         "link": link,
                         "published": getattr(e, "published", ""),
                         "published_local": published_local,
                         "source": getattr(e, "source", {}).get("title") if hasattr(e, "source") else "",
+                        "major": major,       # 최종 재그룹핑을 위해 보관
+                        "minor": minor
                     })
                 total_raw += len(items)
                 bucket.extend(items)
@@ -232,21 +255,21 @@ def run_once():
                 rel = is_relevant(txt, cfg)
                 ai_used += 1
             else:
-                rel = is_relevant(txt, cfg_no_ai)
+                rel = is_relevant(txt, cfg_no_ai)  # 휴리스틱만
             if rel:
                 filtered.append(it)
 
         # 4) 최종 스코어링
         bucket = score_and_filter(filtered, hitset, cfg)
 
-        # 5) ★ 전역 중복 제거하면서 상위 N개 보존
+        # 5) 전역 URL 중복 제거하면서 상위 N개 보존
         kept_unique = []
         for it in bucket:
             nu = normalize_url(it["link"])
-            if nu in global_seen:
+            if nu in global_seen_urls:
                 continue  # 이미 다른 대/중분류에서 채택됨 → 스킵
             kept_unique.append(it)
-            global_seen.add(nu)
+            global_seen_urls.add(nu)
             if len(kept_unique) >= cfg["app"]["max_items_per_subcategory"]:
                 break
 
@@ -255,8 +278,24 @@ def run_once():
         print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, "
               f"ai_used_now={min(top_n,len(prelims)) if use_ai else 0}, kept_unique={len(kept_unique)}")
 
+    # ---------------- 최종 단계: 제목 유사도 전역 중복 제거 ----------------
+    # 6) 모든 최종 아이템 평탄화
+    all_final = []
+    for major, minors in grouped.items():
+        for minor, items in minors.items():
+            all_final.extend(items)
+
+    # 7) 제목 유사도 기반 전역 dedupe (threshold=0.88 권장)
+    deduped_final = dedupe_by_title_similarity(all_final, threshold=0.88)
+
+    # 8) 카테고리 구조로 재구성 (원 소속 유지)
+    grouped_clean = {}
+    for it in deduped_final:
+        major, minor = it.get("major"), it.get("minor")
+        grouped_clean.setdefault(major, {}).setdefault(minor, []).append(it)
+
     # HTML 생성 (제목만 표시)
-    html = make_html_email(grouped, cfg, start_dt, end_dt)
+    html = make_html_email(grouped_clean, cfg, start_dt, end_dt)
 
     # 미리보기 저장
     try:
@@ -266,14 +305,14 @@ def run_once():
     except Exception as ex:
         print(f"[WARN] preview save failed: {ex}")
 
-    print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}, ai_used={ai_used}")
-    if total_kept == 0:
+    print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}, ai_used={ai_used}, final={len(deduped_final)}")
+    if len(deduped_final) == 0:
         print("[INFO] No items kept; sending email anyway (empty) to validate SMTP...")
 
     # 메일 전송
     try:
         send_email(html, cfg)
-        print(f"[OK] Sent {total_kept} items.")
+        print(f"[OK] Sent {len(deduped_final)} items.")
     except Exception as ex:
         print(f"[ERROR] send_email failed: {ex}")
         raise
