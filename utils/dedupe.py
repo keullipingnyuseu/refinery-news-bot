@@ -1,11 +1,8 @@
-# utils/dedupe.py
 import re
 from urllib.parse import urlparse, parse_qs, urlunparse
 from rapidfuzz.distance import Levenshtein
 
-TITLE_TAGS_RE = re.compile(r'^\s*(\[속보\]|\[단독\]|\[영상\]|\[포토\]|\(종합\)|\[종합\])\s*', re.I)
-
-def normalize_url(u):
+def normalize_url(u: str) -> str:
     try:
         p = urlparse(u)
         qs = parse_qs(p.query)
@@ -15,21 +12,16 @@ def normalize_url(u):
     except:
         return u
 
-def normalize_title(t: str) -> str:
-    t = (t or "").strip()
-    t = TITLE_TAGS_RE.sub("", t)
-    t = re.sub(r'\s+', ' ', t)
-    return t
-
-def is_similar_title(a, b, threshold=0.88):
+def is_similar_title(a: str, b: str, threshold=0.88) -> bool:
     if not a or not b:
         return False
-    a2 = normalize_title(a)
-    b2 = normalize_title(b)
-    ratio = 1 - (Levenshtein.distance(a2, b2) / max(len(a2), len(b2)))
-    return ratio >= threshold
+    a2 = re.sub(r'\s+', ' ', a.strip())
+    b2 = re.sub(r'\s+', ' ', b.strip())
+    sim = 1 - (Levenshtein.distance(a2, b2) / max(len(a2), len(b2)))
+    return sim >= threshold
 
-def dedupe_items(items):
+def dedupe_items(items: list) -> list:
+    """소분류 내 URL/제목 유사도 중복 제거"""
     seen_urls = set()
     result = []
     for it in items:
@@ -42,18 +34,13 @@ def dedupe_items(items):
         result.append(it)
     return result
 
-def dedupe_by_title_similarity(items, threshold=0.88):
-    result = []
-    seen_titles = []
+def dedupe_by_title_similarity(items: list, threshold=0.88) -> list:
+    """최종 단계 전역 제목 유사도 중복 제거"""
+    result, seen = [], []
     for it in items:
-        title = normalize_title(it.get("title") or "")
-        dup = False
-        for seen in seen_titles:
-            sim = 1 - (Levenshtein.distance(title, seen) / max(len(title), len(seen) or 1))
-            if sim >= threshold:
-                dup = True
-                break
-        if not dup:
-            result.append(it)
-            seen_titles.append(title)
+        t = (it.get("title") or "").strip()
+        if any(is_similar_title(t, s, threshold) for s in seen):
+            continue
+        result.append(it)
+        seen.append(t)
     return result
