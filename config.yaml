@@ -21,8 +21,15 @@ email:
   from_name: "정유 뉴스봇"
   from_addr: "keullipingnyuseu@gmail.com"
   to_addrs:
+    - "sm.joo@gscaltex.com"
     - "wh.lee@gscaltex.com"
-  subject_prefix: "[정유 뉴스]"
+    - "recca@gscaltex.com"
+    - "kahlee@gscaltex.com"
+    - "kwy@gscaltex.com"
+    - "nkk@gscaltex.com"
+    - "mklee@gscaltex.com"
+    
+  subject_prefix: "[이원호 사원의 특수영업팀 일일 정유 뉴스]"
 
 openai:
   enable_ai_filter: true
