@@ -15,9 +15,9 @@ from urllib.parse import quote_plus
 
 from rapidfuzz.distance import Levenshtein
 
-from utils.scoring import compute_score, apply_unrelated_penalty
+
 from utils.dedupe import dedupe_items, normalize_url   # URL 전역 중복 제거에 사용
-from utils.relevance import is_relevant                # AI/휴리스틱 관련성 판정
+
 
 try:
     from apscheduler.schedulers.blocking import BlockingScheduler
@@ -227,56 +227,32 @@ def run_once():
             except Exception as ex:
                 print(f"[WARN] fetch failed for {kw}: {ex}")
 
-        # 1) 소분류 내 중복 제거
-        before = len(bucket)
-        bucket = dedupe_items(bucket)
-        after_dedupe = len(bucket)
+     # 1) 소분류 내 중복 제거
+before = len(bucket)
+bucket = dedupe_items(bucket)
+after_dedupe = len(bucket)
 
-        # 2) 휴리스틱 프리-스코어 정렬
-        prelims = []
-        hitset = set(keywords)
-        for it in bucket:
-            txt = f"{it['title']} {it.get('summary','')}"
-            pre = compute_score(txt, cfg) + apply_unrelated_penalty(hitset, txt, cfg)
-            it["_pre_score"] = pre
-            prelims.append(it)
-        prelims.sort(key=lambda x: x["_pre_score"], reverse=True)
+# 2) 점수/AI 대신 '게시시각 최신순' 정렬
+def _recent_key(it):
+    # published_dt 없으면 가장 오래된 것으로 취급해 뒤로 보냄
+    return it.get("published_dt") or datetime(1970,1,1, tzinfo=pytz.timezone(cfg["app"]["timezone"]))
 
-        # 3) 상위 N개만 AI 필터, 나머지는 휴리스틱
-        global_limit = int(cfg.get("openai", {}).get("relevance_max_checks", 30))
-        can_use = max(0, global_limit - ai_used)
-        top_n = min(can_use, len(prelims))
+bucket.sort(key=_recent_key, reverse=True)
 
-        filtered = []
-        cfg_no_ai = {**cfg, "openai": {**cfg.get("openai", {}), "enable_ai_filter": False}}
-        for idx, it in enumerate(prelims):
-            txt = f"{it['title']}. {it.get('summary','')}"
-            if idx < top_n and use_ai:
-                rel = is_relevant(txt, cfg)
-                ai_used += 1
-            else:
-                rel = is_relevant(txt, cfg_no_ai)  # 휴리스틱만
-            if rel:
-                filtered.append(it)
+# 3) 전역 URL 중복 제거하면서 상위 N개 보존
+kept_unique = []
+for it in bucket:
+    nu = normalize_url(it["link"])
+    if nu in global_seen_urls:
+        continue
+    kept_unique.append(it)
+    global_seen_urls.add(nu)
+    if len(kept_unique) >= cfg["app"]["max_items_per_subcategory"]:
+        break
 
-        # 4) 최종 스코어링
-        bucket = score_and_filter(filtered, hitset, cfg)
-
-        # 5) 전역 URL 중복 제거하면서 상위 N개 보존
-        kept_unique = []
-        for it in bucket:
-            nu = normalize_url(it["link"])
-            if nu in global_seen_urls:
-                continue  # 이미 다른 대/중분류에서 채택됨 → 스킵
-            kept_unique.append(it)
-            global_seen_urls.add(nu)
-            if len(kept_unique) >= cfg["app"]["max_items_per_subcategory"]:
-                break
-
-        grouped[major][minor] = kept_unique
-        total_kept += len(kept_unique)
-        print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, "
-              f"ai_used_now={min(top_n,len(prelims)) if use_ai else 0}, kept_unique={len(kept_unique)}")
+grouped[major][minor] = kept_unique
+total_kept += len(kept_unique)
+print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, kept_unique={len(kept_unique)}")
 
     # ---------------- 최종 단계: 제목 유사도 전역 중복 제거 ----------------
     # 6) 모든 최종 아이템 평탄화
