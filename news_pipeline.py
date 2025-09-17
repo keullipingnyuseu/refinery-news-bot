@@ -1,9 +1,10 @@
 # -*- coding: utf-8 -*-
 """
-news_pipeline.py (제목만 표시 / 전역 URL+제목 유사도 중복 제거 / AI 최소화)
+news_pipeline.py (제목만 표시 / 전역 URL+제목 유사도 중복 제거 / 선택형 선별모드)
 - Google News(RSS) 수집
-- 블랙리스트 사전 차단 → (선택) AI 관련성 필터(상위 N개만) → 득점/정렬/TopN
-- HTML 메일: 제목, 게시 시각(KST), 링크 버튼  ※ 요약/본문 미표시
+- (필수) 도메인/블랙리스트 차단 → (선택) 휴리스틱+AI 관련성 → TopN 선발
+- 메일 카드: 제목, 게시 시각(KST), 원문 링크
+- 최종 단계에서 '제목 유사도 전역 dedupe'로 중복 제목 제거
 """
 
 import os, sys, smtplib, pytz, yaml, feedparser, requests
@@ -15,14 +16,17 @@ from urllib.parse import quote_plus
 
 from rapidfuzz.distance import Levenshtein
 
+# 선택 모드가 "scored"일 때만 사용
+from utils.scoring import compute_score, apply_unrelated_penalty
+from utils.relevance import is_relevant
 
-from utils.dedupe import dedupe_items, normalize_url   # URL 전역 중복 제거에 사용
-
+from utils.dedupe import dedupe_items, normalize_url
 
 try:
     from apscheduler.schedulers.blocking import BlockingScheduler
 except Exception:
     BlockingScheduler = None
+
 
 # ----------------- Helpers -----------------
 
@@ -38,7 +42,7 @@ def google_news_rss(query, cfg):
         "gl": cfg["sources"]["google_news"]["gl"],
         "ceid": cfg["sources"]["google_news"]["ceid"],
     }
-    q = "&".join([f"{k}={quote_plus(v)}" for k,v in params.items()])
+    q = "&".join([f"{k}={quote_plus(v)}" for k, v in params.items()])
     url = f"{base}?{q}"
     headers = {"User-Agent": "Mozilla/5.0 (refinery-news-bot; +https://github.com)"}
     r = requests.get(url, headers=headers, timeout=15)
@@ -76,6 +80,15 @@ def to_local_str(published, tz):
     except Exception:
         return "시간 정보 없음"
 
+def published_dt_kst(published_parsed, tz):
+    try:
+        if published_parsed:
+            return datetime(*published_parsed[:6], tzinfo=pytz.utc).astimezone(tz)
+    except Exception:
+        pass
+    # 없으면 옛 날짜로 치환(정렬 뒤로 보냄)
+    return datetime(1970, 1, 1, tzinfo=tz)
+
 # 제목 유사도 전역 중복 제거 (Levenshtein similarity)
 def dedupe_by_title_similarity(items, threshold=0.88):
     result = []
@@ -84,7 +97,6 @@ def dedupe_by_title_similarity(items, threshold=0.88):
         title = (it.get("title") or "").strip()
         dup = False
         for seen in seen_titles:
-            # 유사도 = 1 - (edit distance / max len)
             sim = 1 - (Levenshtein.distance(title, seen) / max(len(title), len(seen) or 1))
             if sim >= threshold:
                 dup = True
@@ -93,6 +105,7 @@ def dedupe_by_title_similarity(items, threshold=0.88):
             result.append(it)
             seen_titles.append(title)
     return result
+
 
 # ----------------- Pipeline pieces -----------------
 
@@ -106,24 +119,12 @@ def block_by_keywords(title, summary, cfg):
             return True
     return False
 
-def score_and_filter(items, hit_keywords, cfg):
-    scored = []
-    for it in items:
-        text = f'{it["title"]} {it.get("summary","")}'
-        s = compute_score(text, cfg)
-        s += apply_unrelated_penalty(hit_keywords, text, cfg)
-        if s < 0:
-            continue
-        it["score"] = s
-        scored.append(it)
-    return sorted(scored, key=lambda x: x["score"], reverse=True)
-
 def make_html_email(grouped, cfg, start_dt, end_dt):
     # 제목 + 게시 시각 + 링크 버튼만 출력
     head = f"""
     <html><body style="font-family:Arial,Helvetica,sans-serif;">
       <h2>정유 뉴스 요약 ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')} KST)</h2>
-      <p style="color:#666;">정유사 직원 관점 유의미 기사만 선별했습니다. (각 카드에 게시 시각 표시)</p>
+      <p style="color:#666;">정유사 직원 관점 유의미 기사만(규칙/선택적 AI) 선별했으며, 게시 시각을 함께 표기합니다.</p>
     """
     cards = []
     for major, minors in grouped.items():
@@ -164,6 +165,7 @@ def send_email(html, cfg):
     server.sendmail(cfg["email"]["from_addr"], cfg["email"]["to_addrs"], msg.as_string())
     server.quit()
 
+
 # ----------------- Main run -----------------
 
 def run_once():
@@ -173,7 +175,10 @@ def run_once():
     end_dt = now
     start_dt = end_dt - timedelta(hours=cfg["app"]["lookback_hours"])
 
-    print(f"[INFO] Window: {start_dt} ~ {end_dt} {cfg['app']['timezone']}")
+    # 선택 모드: "recent" (기본) | "scored"
+    selection_mode = (cfg.get("app", {}).get("selection_mode") or "recent").lower()
+
+    print(f"[INFO] Window: {start_dt} ~ {end_dt} {cfg['app']['timezone']} (mode={selection_mode})")
     taxonomy = cfg["taxonomy"]
     grouped = {}
     total_raw = 0
@@ -182,10 +187,10 @@ def run_once():
     # 전역 URL 중복 방지용 세트 (정규화 URL 기준)
     global_seen_urls = set()
 
-    # AI 사용 예산
-    ai_budget = int(cfg["openai"].get("relevance_max_checks", 30)) if cfg.get("openai") else 0
+    # AI 사용 예산 (scored 모드일 때만 실사용)
+    ai_budget = int(cfg.get("openai", {}).get("relevance_max_checks", 30))
     ai_used = 0
-    use_ai = bool(cfg.get("openai", {}).get("enable_ai_filter", False))
+    use_ai_flag = bool(cfg.get("openai", {}).get("enable_ai_filter", False))
 
     for tax in taxonomy:
         major, minor = tax["major"], tax["minor"]
@@ -207,19 +212,20 @@ def run_once():
                     title, summary = extract_text(e)
                     if not title:
                         continue
-                    if not within_window(getattr(e, "published_parsed", None), tz, start_dt, end_dt):
+                    published_parsed = getattr(e, "published_parsed", None)
+                    if not within_window(published_parsed, tz, start_dt, end_dt):
                         continue
                     if block_by_keywords(title, summary, cfg):
                         continue
-                    published_local = to_local_str(getattr(e, "published_parsed", None), tz)
                     items.append({
                         "title": title,
-                        "summary": summary,   # 내부 스코어링용, 렌더링에는 미사용
+                        "summary": summary,   # 렌더링 미사용
                         "link": link,
                         "published": getattr(e, "published", ""),
-                        "published_local": published_local,
+                        "published_local": to_local_str(published_parsed, tz),
+                        "published_dt": published_dt_kst(published_parsed, tz),
                         "source": getattr(e, "source", {}).get("title") if hasattr(e, "source") else "",
-                        "major": major,       # 최종 재그룹핑을 위해 보관
+                        "major": major,
                         "minor": minor
                     })
                 total_raw += len(items)
@@ -227,50 +233,87 @@ def run_once():
             except Exception as ex:
                 print(f"[WARN] fetch failed for {kw}: {ex}")
 
-     # 1) 소분류 내 중복 제거
-before = len(bucket)
-bucket = dedupe_items(bucket)
-after_dedupe = len(bucket)
+        # 1) 소분류 내 중복 제거
+        before = len(bucket)
+        bucket = dedupe_items(bucket)
+        after_dedupe = len(bucket)
 
-# 2) 점수/AI 대신 '게시시각 최신순' 정렬
-def _recent_key(it):
-    # published_dt 없으면 가장 오래된 것으로 취급해 뒤로 보냄
-    return it.get("published_dt") or datetime(1970,1,1, tzinfo=pytz.timezone(cfg["app"]["timezone"]))
+        # 2) 선별 로직
+        if selection_mode == "recent":
+            # 점수/AI 전혀 사용하지 않고 '최신순' 정렬
+            bucket.sort(key=lambda it: it.get("published_dt"), reverse=True)
+            filtered = bucket  # 전부 통과(이미 블랙리스트/도메인/윈도우 통과한 것들)
+            ai_used_now = 0
+        else:
+            # "scored": 휴리스틱 프리-스코어 → 상위 N개만 AI → 최종 스코어 정렬
+            prelims = []
+            hitset = set(keywords)
+            for it in bucket:
+                txt = f"{it['title']} {it.get('summary','')}"
+                pre = compute_score(txt, cfg) + apply_unrelated_penalty(hitset, txt, cfg)
+                it["_pre_score"] = pre
+                prelims.append(it)
+            prelims.sort(key=lambda x: x["_pre_score"], reverse=True)
 
-bucket.sort(key=_recent_key, reverse=True)
+            can_use = max(0, ai_budget - ai_used)
+            top_n = min(can_use, len(prelims))
 
-# 3) 전역 URL 중복 제거하면서 상위 N개 보존
-kept_unique = []
-for it in bucket:
-    nu = normalize_url(it["link"])
-    if nu in global_seen_urls:
-        continue
-    kept_unique.append(it)
-    global_seen_urls.add(nu)
-    if len(kept_unique) >= cfg["app"]["max_items_per_subcategory"]:
-        break
+            filtered = []
+            cfg_no_ai = {**cfg, "openai": {**cfg.get("openai", {}), "enable_ai_filter": False}}
+            ai_used_now = 0
+            for idx, it in enumerate(prelims):
+                txt = f"{it['title']}. {it.get('summary','')}"
+                if idx < top_n and use_ai_flag:
+                    rel = is_relevant(txt, cfg)     # 내부에서 실패 시 휴리스틱
+                    ai_used += 1
+                    ai_used_now += 1
+                else:
+                    rel = is_relevant(txt, cfg_no_ai)
+                if rel:
+                    filtered.append(it)
 
-grouped[major][minor] = kept_unique
-total_kept += len(kept_unique)
-print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, kept_unique={len(kept_unique)}")
+            # 최종 스코어 기반 정렬
+            # (주의: 여기서는 compute_score/apply_unrelated_penalty가 이미 반영되어 있음)
+            # 좀 더 신뢰하려면 다시 정렬
+            hitset2 = set(keywords)
+            def _score_final(it):
+                t = f"{it['title']} {it.get('summary','')}"
+                return compute_score(t, cfg) + apply_unrelated_penalty(hitset2, t, cfg)
+            filtered.sort(key=_score_final, reverse=True)
+
+        # 3) 전역 URL 중복 제거하면서 상위 N개 보존
+        kept_unique = []
+        for it in filtered:
+            nu = normalize_url(it["link"])
+            if nu in global_seen_urls:
+                continue
+            kept_unique.append(it)
+            global_seen_urls.add(nu)
+            if len(kept_unique) >= cfg["app"]["max_items_per_subcategory"]:
+                break
+
+        grouped[major][minor] = kept_unique
+        total_kept += len(kept_unique)
+        if selection_mode == "recent":
+            print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, kept_unique={len(kept_unique)}")
+        else:
+            print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, ai_used_now={ai_used_now}, kept_unique={len(kept_unique)}")
 
     # ---------------- 최종 단계: 제목 유사도 전역 중복 제거 ----------------
-    # 6) 모든 최종 아이템 평탄화
     all_final = []
     for major, minors in grouped.items():
         for minor, items in minors.items():
             all_final.extend(items)
 
-    # 7) 제목 유사도 기반 전역 dedupe (threshold=0.88 권장)
     deduped_final = dedupe_by_title_similarity(all_final, threshold=0.88)
 
-    # 8) 카테고리 구조로 재구성 (원 소속 유지)
+    # 카테고리 구조로 재구성
     grouped_clean = {}
     for it in deduped_final:
         major, minor = it.get("major"), it.get("minor")
         grouped_clean.setdefault(major, {}).setdefault(minor, []).append(it)
 
-    # HTML 생성 (제목만 표시)
+    # HTML 생성
     html = make_html_email(grouped_clean, cfg, start_dt, end_dt)
 
     # 미리보기 저장
@@ -281,7 +324,7 @@ print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, kept_uniqu
     except Exception as ex:
         print(f"[WARN] preview save failed: {ex}")
 
-    print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}, ai_used={ai_used}, final={len(deduped_final)}")
+    print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}, final={len(deduped_final)}, ai_used_total={ai_used}")
     if len(deduped_final) == 0:
         print("[INFO] No items kept; sending email anyway (empty) to validate SMTP...")
 
@@ -292,6 +335,7 @@ print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, kept_uniqu
     except Exception as ex:
         print(f"[ERROR] send_email failed: {ex}")
         raise
+
 
 def main():
     if "--once" in sys.argv or BlockingScheduler is None:
@@ -306,6 +350,7 @@ def main():
         sched.start()
     except (KeyboardInterrupt, SystemExit):
         pass
+
 
 if __name__ == "__main__":
     main()
