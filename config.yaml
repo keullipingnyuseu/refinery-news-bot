@@ -36,7 +36,7 @@ email:
 
 
   # (AI 필터링) 강력 필터 옵션
-  enable_ai_filter: true
+  enable_ai_filter: false
   relevance_model: "gpt-4o-mini"     # 분류에 사용할 모델
   relevance_max_checks: 30           # 실행 1회당 최대 AI 판별 호출 수(예: 전체 후보 중 상위 80개만 AI 판별)
   relevance_delay_secs: 0.8          # 호출간 딜레이
