@@ -30,7 +30,7 @@ email:
 openai:
   enable_ai_filter: true
   relevance_model: "gpt-4o-mini"
-  relevance_max_checks: 10
+  relevance_max_checks: 40
   relevance_delay_secs: 1.0
   relevance_backoff_secs: 8
   relevance_threshold: 0.65
