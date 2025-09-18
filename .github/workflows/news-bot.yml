@@ -28,7 +28,7 @@ jobs:
           pip install -r requirements.txt
 
       - name: Run news bot
-        run: news_pipeline.py
+        run: news_pipeline.py --once
         env:
           OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
           GMAIL_USER: ${{ secrets.GMAIL_USER }}
