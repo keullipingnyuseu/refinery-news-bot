@@ -22,7 +22,6 @@ email:
   from_addr: "keullipingnyuseu@gmail.com"
   to_addrs:
     - "wh.lee@gscaltex.com"
-
   reply_to: "wh.lee@gscaltex.com"   # 응답은 회사주소로 받되, 발신은 Gmail로
 
 
