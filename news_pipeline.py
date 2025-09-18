@@ -96,7 +96,7 @@ def published_dt_kst(published_parsed, tz):
 def make_html_email(grouped, cfg, start_dt, end_dt):
     head = f"""
     <html><body style="font-family:Arial,Helvetica,sans-serif;">
-      <h2>정유 뉴스 요약 ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')} KST)</h2>
+      <h2> [이원호 사원의 특수영업팀 일일 정유 뉴스] ({start_dt.strftime('%Y-%m-%d %H:%M')} ~ {end_dt.strftime('%Y-%m-%d %H:%M')} KST)</h2>
       <p style="color:#666;">수요/가격 변동에 직결된 기사 위주로 선별했습니다. (게시 시각 표기)</p>
     """
     cards = []
@@ -137,7 +137,7 @@ def send_email(html, cfg):
     msg["From"] = GMAIL_USER
     msg["To"] = ", ".join(TO_LIST)
 
-    msg.attach(MIMEText("정유 뉴스 요약 (HTML 버전 참조)", "plain", "utf-8"))
+    msg.attach(MIMEText("[이원호 사원의 특수영업팀 일일 정유 뉴스] (HTML 버전 참조)", "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
 
     server = smtplib.SMTP("smtp.gmail.com", 587)
