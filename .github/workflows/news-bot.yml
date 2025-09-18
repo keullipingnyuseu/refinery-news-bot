@@ -27,11 +27,15 @@ jobs:
           python -m pip install --upgrade pip
           pip install -r requirements.txt
 
-      - name: Run news pipeline (ONCE)
-        run: |
-          echo "[RUN] $(date) starting news_pipeline.py --once"
-          python news_pipeline.py --once
-          echo "[RUN] $(date) finished"
+      - name: Run news bot
+        run: news_pipeline.py
+        env:
+          OPENAI_API_KEY: ${{ secrets.OPENAI_API_KEY }}
+          GMAIL_USER: ${{ secrets.GMAIL_USER }}
+          GMAIL_PASS: ${{ secrets.GMAIL_PASS }}
+          TO_LIST: ${{ secrets.TO_LIST }}
+ 
+  
 
       - name: Upload HTML preview (always)
         if: always()
