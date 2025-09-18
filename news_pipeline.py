@@ -23,6 +23,16 @@ try:
 except Exception:
     BlockingScheduler = None
 
+OPENAI_API_KEY = os.environ.get("OPENAI_API_KEY")
+GMAIL_USER = os.environ.get("GMAIL_USER")
+GMAIL_PASS = os.environ.get("GMAIL_PASS")
+TO_LIST = os.environ.get("TO_LIST", "").split(",")
+
+if not OPENAI_API_KEY or not GMAIL_USER or not GMAIL_PASS:
+    print("❌ 환경변수가 올바르게 설정되지 않았습니다.")
+    exit(1)
+
+
 # ----------------- helpers -----------------
 
 def load_config(path="config.yaml"):
