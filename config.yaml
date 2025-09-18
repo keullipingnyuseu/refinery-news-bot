@@ -30,9 +30,8 @@ email:
 openai:
   enable_ai_filter: true
   relevance_model: "gpt-4o-mini"
-  relevance_max_checks: 30
-  relevance_delay_secs: 1.0
-  relevance_backoff_secs: 8
+  relevance_max_checks: 30   # 상위 20개 기사만 AI 필터링
+  relevance_backoff_secs: 5
   relevance_threshold: 0.65
   api_key_env: "OPENAI_API_KEY"
 
