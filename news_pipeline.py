@@ -119,11 +119,16 @@ def make_html_email(grouped, cfg, start_dt, end_dt):
     tail = "</body></html>"
     return head + "\n".join(cards) + tail
 
-def send_email(html):
+def send_email(html, cfg):
     from email.mime.multipart import MIMEMultipart
     from email.mime.text import MIMEText
     import smtplib
     from datetime import datetime
+    import os
+
+    GMAIL_USER = os.environ.get("GMAIL_USER")
+    GMAIL_PASS = os.environ.get("GMAIL_PASS")
+    TO_LIST = os.environ.get("TO_LIST", "").split(",")
 
     subject = f"[뉴스봇] {datetime.now().strftime('%Y-%m-%d')}"
 
@@ -132,7 +137,6 @@ def send_email(html):
     msg["From"] = GMAIL_USER
     msg["To"] = ", ".join(TO_LIST)
 
-    # plain text fallback
     msg.attach(MIMEText("정유 뉴스 요약 (HTML 버전 참조)", "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
 
@@ -146,6 +150,7 @@ def send_email(html):
         print("❌ 일부 수신자가 거부됨:", refused)
     else:
         print(f"[OK] 메일 발송 완료 ({len(TO_LIST)}명)")
+
 
 
 
