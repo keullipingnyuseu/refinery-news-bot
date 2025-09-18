@@ -1,4 +1,4 @@
-import os, time, re
+import os, re, time
 try:
     from openai import OpenAI
 except Exception:
@@ -12,6 +12,7 @@ AI_SYSTEM = """너는 정유사 영업/기획 담당자다.
 JSON 한 줄: {"relevant": true/false, "confidence": 0~1} 로만 답하라."""
 
 def ai_relevance_score(text: str, cfg: dict) -> float:
+    """AI 모델로 기사 관련성을 판별 (빠른 버전: retries=1, delay=0)."""
     if not cfg.get("openai", {}).get("enable_ai_filter", False):
         return -1.0
     api_key = os.getenv(cfg["openai"].get("api_key_env", "OPENAI_API_KEY") or "")
@@ -20,47 +21,45 @@ def ai_relevance_score(text: str, cfg: dict) -> float:
 
     client = OpenAI(api_key=api_key)
     model = cfg["openai"].get("relevance_model", "gpt-4o-mini")
-    delay = float(cfg["openai"].get("relevance_delay_secs", 1.0))
     backoff = float(cfg["openai"].get("relevance_backoff_secs", 8))
 
-    for _ in range(3):
-        try:
-            resp = client.chat.completions.create(
-                model=model,
-                messages=[{"role":"system","content":AI_SYSTEM},
-                          {"role":"user","content":(text or "")[:1800]}],
-                temperature=0,
-                max_tokens=100,
-            )
-            ans = resp.choices[0].message.content or ""
-            rel = re.search(r'"relevant"\s*:\s*(true|false)', ans, re.I)
-            conf = re.search(r'"confidence"\s*:\s*([0-9.]+)', ans, re.I)
-            ok = (rel and rel.group(1).lower() == "true")
-            c  = float(conf.group(1)) if conf else (0.8 if ok else 0.2)
-            if delay > 0:
-                time.sleep(delay)
-            return c if ok else 0.0
-        except Exception as e:
-            if "429" in str(e) or "Rate limit" in str(e):
-                time.sleep(backoff)
-                continue
+    try:
+        resp = client.chat.completions.create(
+            model=model,
+            messages=[{"role": "system", "content": AI_SYSTEM},
+                      {"role": "user", "content": (text or "")[:1800]}],
+            temperature=0,
+            max_tokens=100,
+        )
+        ans = resp.choices[0].message.content or ""
+        rel = re.search(r'"relevant"\s*:\s*(true|false)', ans, re.I)
+        conf = re.search(r'"confidence"\s*:\s*([0-9.]+)', ans, re.I)
+        ok = (rel and rel.group(1).lower() == "true")
+        c = float(conf.group(1)) if conf else (0.8 if ok else 0.2)
+        return c if ok else 0.0
+    except Exception as e:
+        if "429" in str(e) or "Rate limit" in str(e):
+            time.sleep(backoff)  # 단 한 번만 백오프
             return -1.0
-    return -1.0
+        return -1.0
 
 def is_relevant(text: str, cfg: dict) -> bool:
+    """AI 점수 또는 휴리스틱으로 기사 관련 여부 판별"""
     thr = float(cfg["openai"].get("relevance_threshold", 0.65))
-    # 블랙리스트 즉시 컷
     low = (text or "").lower()
+
+    # 블랙리스트 즉시 차단
     for w in cfg["filters"].get("block_keywords", []):
         if w.lower() in low:
             return False
+
     score = ai_relevance_score(text, cfg)
     if score >= 0:
         return score >= thr
-    # AI 실패 시 보수적 휴리스틱: 가격/수요/ops 시그널이 하나라도 있으면 True
-    tl = low
+
+    # AI 실패 시 휴리스틱 fallback
     sig = cfg["scoring"]
-    def _hit(terms): return any(t.lower() in tl for t in terms)
+    def _hit(terms): return any(t.lower() in low for t in terms)
     if _hit(sig["price_signals"]["terms"]) or _hit(sig["demand_signals"]["terms"]) or _hit(sig["ops_supply_signals"]["terms"]):
         return True
     return False
