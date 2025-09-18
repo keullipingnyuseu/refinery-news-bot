@@ -119,56 +119,34 @@ def make_html_email(grouped, cfg, start_dt, end_dt):
     tail = "</body></html>"
     return head + "\n".join(cards) + tail
 
-def send_email(html, cfg):
-    from_addr = cfg["email"]["from_addr"].strip()
-    username  = cfg["email"]["username"].strip()
-    to_addrs  = [a.strip() for a in cfg["email"]["to_addrs"]]
-    subject   = f"{cfg['email']['subject_prefix']} {datetime.now().strftime('%Y-%m-%d')}"
+def send_email(html):
+    from email.mime.multipart import MIMEMultipart
+    from email.mime.text import MIMEText
+    import smtplib
+    from datetime import datetime
 
-    # 1) From 헤더 = 로그인 계정과 동일하게 유지 (DMARC 회피)
-    if from_addr.lower() != username.lower():
-        print(f"[WARN] From({from_addr}) != SMTP user({username}). DMARC 문제 가능 → From을 SMTP 계정으로 강제 변경")
-        from_addr = username
+    subject = f"[뉴스봇] {datetime.now().strftime('%Y-%m-%d')}"
 
-    # 2) 메일 본문: text/plain + text/html (multipart/alternative)
-    text_fallback = "정유 뉴스 요약\n\nHTML 뷰가 보이지 않으면 원문 링크에서 확인하세요."
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
-    msg["From"] = f"{cfg['email']['from_name']} <{from_addr}>"
-    msg["To"] = ", ".join(to_addrs)
+    msg["From"] = GMAIL_USER
+    msg["To"] = ", ".join(TO_LIST)
 
-    # (선택) Reply-To 지원
-    reply_to = cfg["email"].get("reply_to")
-    if reply_to:
-        msg["Reply-To"] = reply_to
-
-    msg.attach(MIMEText(text_fallback, "plain", "utf-8"))
+    # plain text fallback
+    msg.attach(MIMEText("정유 뉴스 요약 (HTML 버전 참조)", "plain", "utf-8"))
     msg.attach(MIMEText(html, "html", "utf-8"))
 
-    print(f"[SMTP] host={cfg['email']['smtp_host']} port={cfg['email']['smtp_port']} tls={cfg['email']['use_tls']}")
-    server = smtplib.SMTP(cfg["email"]["smtp_host"], cfg["email"]["smtp_port"], timeout=30)
-    server.set_debuglevel(1)  # SMTP 세션 로깅
+    server = smtplib.SMTP("smtp.gmail.com", 587)
+    server.starttls()
+    server.login(GMAIL_USER, GMAIL_PASS)
+    refused = server.sendmail(GMAIL_USER, TO_LIST, msg.as_string())
+    server.quit()
 
-    try:
-        if cfg["email"]["use_tls"]:
-            server.starttls()
-        pwd = os.getenv(cfg["email"]["password_env"], "")
-        if username:
-            print(f"[SMTP] login as {username} (pwd={'SET' if bool(pwd) else 'EMPTY'})")
-            server.login(username, pwd)
+    if refused:
+        print("❌ 일부 수신자가 거부됨:", refused)
+    else:
+        print(f"[OK] 메일 발송 완료 ({len(TO_LIST)}명)")
 
-        # 3) ‘엔벨로프 From’도 SMTP 계정으로 맞춰 전송 (DMARC 회피)
-        refused = server.sendmail(from_addr, to_addrs, msg.as_string())
-        # sendmail()은 거부된 수신자를 {email: (code, resp)} 형태로 반환. 빈 dict이면 모두 수락.
-        if refused:
-            print("[ERROR] Some recipients refused by SMTP:", refused)
-        else:
-            print("[OK] SMTP accepted all recipients.")
-    finally:
-        try:
-            server.quit()
-        except Exception:
-            pass
 
 
 # ----------------- main -----------------
