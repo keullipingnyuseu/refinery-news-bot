@@ -23,6 +23,9 @@ email:
   to_addrs:
     - "wh.lee@gscaltex.com"
 
+  reply_to: "wh.lee@gscaltex.com"   # 응답은 회사주소로 받되, 발신은 Gmail로
+
+
   subject_prefix: "[이원호 사원의 특수영업팀 일일 정유 뉴스]"
 
 openai:
