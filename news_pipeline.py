@@ -269,8 +269,8 @@ def run_once():
         for minor, items in minors.items():
             all_final.extend(items)
 
-    # utils.dedupe.dedupe_by_title_similarity(threshold=0.88, min_overlap=3)를 사용
-    final_dedup = dedupe_by_title_similarity(all_final, threshold=0.88, min_overlap=3)
+    # utils.dedupe.dedupe_by_title_similarity(threshold=0.88, min_overlap=2)를 사용
+    final_dedup = dedupe_by_title_similarity(all_final, threshold=0.88, min_overlap=2)
 
     grouped_clean = {}
     for it in final_dedup:
