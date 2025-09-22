@@ -52,7 +52,7 @@ def _word_overlap_count(a: str, b: str) -> int:
     sa, sb = set(_tokenize_title(a)), set(_tokenize_title(b))
     return len(sa & sb)
 
-def is_duplicate_by_overlap(a: str, b: str, min_overlap: int = 3) -> bool:
+def is_duplicate_by_overlap(a: str, b: str, min_overlap: int = 2) -> bool:
     """공통 단어가 min_overlap개 이상이면 중복으로 간주"""
     if not a or not b:
         return False
@@ -73,7 +73,7 @@ def dedupe_items(items: list) -> list:
         dup = False
         for prev in result:
             pt = (prev.get("title") or "").strip()
-            if is_similar_title(t, pt, threshold=0.88) or is_duplicate_by_overlap(t, pt, min_overlap=3):
+            if is_similar_title(t, pt, threshold=0.88) or is_duplicate_by_overlap(t, pt, min_overlap=2):
                 dup = True
                 break
         if dup:
