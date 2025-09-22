@@ -275,18 +275,21 @@ def run_once():
         total_kept += len(kept_unique)
         print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, ai_used_now={ai_used_now}, kept={len(kept_unique)}")
 
-    # ---------------- 최종: 제목 유사도 전역 dedupe ----------------
-    all_final = []
-    for major, minors in grouped.items():
-        for minor, items in minors.items():
-            all_final.extend(items)
+# ---------------- 최종: 제목 유사도 + 단어 중복 기반 전역 dedupe ----------------
+all_final = []
+for major, minors in grouped.items():
+    for minor, items in minors.items():
+        all_final.extend(items)
 
-    final_dedup = dedupe_by_title_similarity(all_final, threshold=0.88)
+# 기존: dedupe_by_title_similarity(all_final, threshold=0.88)
+# 변경: 단어 중복까지 함께 적용
+final_dedup = dedupe_by_title_similarity(all_final, threshold=0.88, min_overlap=3)
 
-    # 카테고리 재구성
-    grouped_clean = {}
-    for it in final_dedup:
-        grouped_clean.setdefault(it["major"], {}).setdefault(it["minor"], []).append(it)
+# 카테고리 재구성
+grouped_clean = {}
+for it in final_dedup:
+    grouped_clean.setdefault(it["major"], {}).setdefault(it["minor"], []).append(it)
+
 
     # HTML 생성/저장/전송
     html = make_html_email(grouped_clean, cfg, start_dt, end_dt)
