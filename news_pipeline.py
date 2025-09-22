@@ -130,7 +130,7 @@ def send_email(html, cfg):
     GMAIL_PASS = os.environ.get("GMAIL_PASS")
     TO_LIST = os.environ.get("TO_LIST", "").split(",")
 
-    subject = f"[뉴스봇] {datetime.now().strftime('%Y-%m-%d')}"
+    subject = f"[특수영업팀 Daily 뉴스클리핑] {datetime.now().strftime('%Y-%m-%d')}"
 
     msg = MIMEMultipart("alternative")
     msg["Subject"] = subject
