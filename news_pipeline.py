@@ -167,16 +167,17 @@ def run_once():
 
     print(f"[INFO] Window: {start_dt} ~ {end_dt} {cfg['app']['timezone']} (mode={selection_mode})")
     taxonomy = cfg["taxonomy"]
-    grouped = {}
+
+    grouped = {}                 # ← 반드시 run_once() 내부에서 초기화
     total_raw = 0
     total_kept = 0
-
     global_seen_urls = set()
 
-    ai_budget = int(cfg.get("openai", {}).get("relevance_max_checks", 40))
+    ai_budget = int(cfg.get("openai", {}).get("relevance_max_checks", 20))
     ai_used = 0
     use_ai = bool(cfg.get("openai", {}).get("enable_ai_filter", False))
 
+    # --- 수집/1차필터/선별 ---
     for tax in taxonomy:
         major, minor = tax["major"], tax["minor"]
         grouped.setdefault(major, {})
@@ -188,7 +189,6 @@ def run_once():
             try:
                 d = google_news_rss(kw, cfg)
                 print(f"[FETCH] {major}/{minor}/{kw}: entries={len(d.entries)}")
-                items = []
                 for e in d.entries:
                     link = e.get("link", "")
                     if not link or is_block_domain(link, cfg):
@@ -199,13 +199,12 @@ def run_once():
                     pub_p = getattr(e, "published_parsed", None)
                     if not within_window(pub_p, tz, start_dt, end_dt):
                         continue
-                    # 블랙리스트 즉시 컷
                     low = f"{title} {summary}".lower()
                     if any(w.lower() in low for w in cfg["filters"].get("block_keywords", [])):
                         continue
                     bucket.append({
                         "title": title,
-                        "summary": summary,  # 내부 스코어 참고용
+                        "summary": summary,
                         "link": link,
                         "published": getattr(e, "published", ""),
                         "published_local": to_local_str(pub_p, tz),
@@ -213,26 +212,20 @@ def run_once():
                         "major": major,
                         "minor": minor
                     })
-                total_raw += len(items)
-                # 위에서 items 로 누적하지 않고 바로 bucket에 append 했으니 total_raw는 아래로 보정
-                total_raw += len(bucket)
             except Exception as ex:
                 print(f"[WARN] fetch failed for {kw}: {ex}")
 
-        # 1) 소분류 내 dedupe
         before = len(bucket)
-        bucket = dedupe_items(bucket)
+        bucket = dedupe_items(bucket)  # (URL + 제목유사도 + 단어중복) 소분류 dedupe
         after_dedupe = len(bucket)
 
         if selection_mode == "scored":
-            # 2) 휴리스틱 프리-스코어 정렬
             hitset = set(keywords)
             for it in bucket:
                 txt = f"{it['title']} {it.get('summary','')}"
                 it["_pre_score"] = compute_score(txt, cfg) + apply_unrelated_penalty(hitset, txt, cfg)
             bucket.sort(key=lambda x: x["_pre_score"], reverse=True)
 
-            # 3) 상위 N개만 AI 필터
             can_use = max(0, ai_budget - ai_used)
             top_n = min(can_use, len(bucket))
             filtered = []
@@ -241,26 +234,20 @@ def run_once():
             for idx, it in enumerate(bucket):
                 txt = f"{it['title']}. {it.get('summary','')}"
                 if idx < top_n and use_ai:
-                    rel = is_relevant(txt, cfg)
+                    rel = is_relevant(txt, cfg)     # 빠른 버전 relevance (delay=0, retries=1)
                     ai_used += 1
                     ai_used_now += 1
                 else:
-                    rel = is_relevant(txt, cfg_no_ai)  # 휴리스틱 폴백
+                    rel = is_relevant(txt, cfg_no_ai)
                 if rel:
                     filtered.append(it)
 
-            # 4) 최종 정렬: 시그널 점수 우선, 동점이면 최신순
-            def _final_key(it):
-                s = it.get("_pre_score", 0.0)
-                t = it.get("published_dt")
-                return (s, t)
-            filtered.sort(key=_final_key, reverse=True)
+            # 점수 우선, 동점 최신순
+            filtered.sort(key=lambda it: (it.get("_pre_score", 0.0), it.get("published_dt")), reverse=True)
         else:
-            # selection_mode == "recent": 최신순만
             filtered = sorted(bucket, key=lambda it: it.get("published_dt"), reverse=True)
             ai_used_now = 0
 
-        # 5) 전역 URL dedupe + 상한 보존
         kept_unique = []
         for it in filtered:
             nu = normalize_url(it["link"])
@@ -273,26 +260,24 @@ def run_once():
 
         grouped[major][minor] = kept_unique
         total_kept += len(kept_unique)
+        total_raw += before
         print(f"[KEEP] {major}/{minor}: raw={before}, deduped={after_dedupe}, ai_used_now={ai_used_now}, kept={len(kept_unique)}")
 
-# ---------------- 최종: 제목 유사도 + 단어 중복 기반 전역 dedupe ----------------
-all_final = []
-for major, minors in grouped.items():
-    for minor, items in minors.items():
-        all_final.extend(items)
+    # ---------------- 최종: 제목 유사도 + 단어 중복 기반 전역 dedupe ----------------
+    all_final = []
+    for major, minors in grouped.items():
+        for minor, items in minors.items():
+            all_final.extend(items)
 
-# 기존: dedupe_by_title_similarity(all_final, threshold=0.88)
-# 변경: 단어 중복까지 함께 적용
-final_dedup = dedupe_by_title_similarity(all_final, threshold=0.88, min_overlap=3)
+    # utils.dedupe.dedupe_by_title_similarity(threshold=0.88, min_overlap=3)를 사용
+    final_dedup = dedupe_by_title_similarity(all_final, threshold=0.88, min_overlap=3)
 
-# 카테고리 재구성
-grouped_clean = {}
-for it in final_dedup:
-    grouped_clean.setdefault(it["major"], {}).setdefault(it["minor"], []).append(it)
+    grouped_clean = {}
+    for it in final_dedup:
+        grouped_clean.setdefault(it["major"], {}).setdefault(it["minor"], []).append(it)
 
-
-    # HTML 생성/저장/전송
     html = make_html_email(grouped_clean, cfg, start_dt, end_dt)
+
     try:
         with open("email_preview.html", "w", encoding="utf-8") as f:
             f.write(html)
@@ -303,11 +288,12 @@ for it in final_dedup:
     print(f"[SUMMARY] total_raw={total_raw}, total_kept={total_kept}, final={len(final_dedup)}, ai_used_total={ai_used}")
 
     try:
-        send_email(html, cfg)
+        send_email(html, cfg)   # ← 환경변수 기반 send_email(html, cfg) 유지
         print(f"[OK] Sent {len(final_dedup)} items.")
     except Exception as ex:
         print(f"[ERROR] send_email failed: {ex}")
         raise
+
 
 def main():
     if "--once" in sys.argv or BlockingScheduler is None:
